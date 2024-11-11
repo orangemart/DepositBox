@@ -54,11 +54,17 @@ You can edit these values directly in the configuration file if needed.
 ## Permissions
 
 - `depositbox.place`: Grants a player permission to place a deposit box.
+- `depositbox.check`: Grants a player permission to use the /checkdeposits command. 
 
 To assign this permission, use the following command:
 ```bash
 oxide.grant user <username> depositbox.place
 ```
+
+## Commands
+
+- `/depositbox`: Spawns a Deposit Box
+- `/checkdeposits`: Check how much your player has deposited in the box
 
 ## Functionality
 
