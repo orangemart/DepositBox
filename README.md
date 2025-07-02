@@ -60,10 +60,17 @@ A config file is generated at `/oxide/config/DepositBox.json`:
 
 ## Summary Output
 
-Running `/depositsummary` creates:
+Running `/depositsummary` creates the following files in `oxide/data/DepositBox/`:
 
-- `DepositBoxSummary.json`: Full deposit totals and reward percentages.
-- `DepositBoxClaims.json`: Reward amounts per player.
-- `DepositBoxSummary.csv`: Human-readable CSV for external analysis.
+- `DepositBoxSummary.json`: Contains each player’s total deposited, percentage share, and calculated reward.
+- `DepositBoxClaims.json`: Lists the exact amount each player is entitled to claim.
+- `DepositBoxSummary.csv`: A spreadsheet-friendly version for external review or publishing.
 
-These are saved to `oxide/data/DepositBox/`.
+By default, the total reward pool is **100,000 sats**, distributed proportionally based on each player’s share of total deposits.  
+You can override this by adding a number after the command, e.g.:
+
+```bash
+/depositsummary 250000
+```
+
+This will distribute **250,000 sats** instead.
