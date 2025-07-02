@@ -1,44 +1,68 @@
+// DepositBox.cs
 using System;
 using System.Collections.Generic;
-using System.Globalization; // For CultureInfo
+using System.Globalization;
+using System.IO;
 using System.Linq;
+using System.Text;
 using Newtonsoft.Json;
 using Oxide.Core;
 using Oxide.Core.Libraries.Covalence;
 
 namespace Oxide.Plugins
 {
-    [Info("DepositBox", "rustysats", "0.2.0")]
+    [Info("DepositBox", "Orangemart", "1.0.0")]
     [Description("Drop box that registers drops for admin while removing items from the game.")]
-    internal class DepositBox : RustPlugin
+    public class DepositBox : RustPlugin
     {
         private static DepositBox instance;
-        // Configuration variables
         private int DepositItemID;
         private ulong DepositBoxSkinID;
-        // Permission constants
-        private const string permPlace = "depositbox.place";
-        private const string permCheck = "depositbox.check";
-        private const string permAdminCheck = "depositbox.admincheck";
-        private DepositLog depositLog;
-        private Dictionary<Item, BasePlayer> depositTrack = new Dictionary<Item, BasePlayer>(); // Track deposits
+        private int MaxDepositLimit;
 
-        #region Oxide Hooks
+        private const string permPlace = "depositbox.place";
+        private const string permAdminCheck = "depositbox.admincheck";
+
+        private DepositLog depositLog;
+        private Dictionary<Item, BasePlayer> depositTrack = new Dictionary<Item, BasePlayer>();
+
         void Init()
         {
             instance = this;
             LoadConfiguration();
             LoadDepositLog();
             permission.RegisterPermission(permPlace, this);
-            permission.RegisterPermission(permCheck, this);
             permission.RegisterPermission(permAdminCheck, this);
+        }
+
+        [ConsoleCommand("depositsummary")]
+        private void ConsoleDepositSummary(ConsoleSystem.Arg arg)
+        {
+            GenerateDepositSummary(null, 100000);
+            Puts("✅ Deposit summary generated via console command.");
         }
 
         protected override void LoadDefaultConfig()
         {
             PrintWarning("Creating a new configuration file.");
-            Config["DepositItemID"] = -1779183908;    // Default Item ID for deposits (paper)
-            Config["DepositBoxSkinID"] = 1641384897;  // Default skin ID for the deposit box
+            Config["DepositItemID"] = -1779183908;
+            Config["DepositBoxSkinID"] = 1641384897;
+            Config["MaxDepositLimit"] = 1000;
+            SaveConfig();
+        }
+
+        private void LoadConfiguration()
+        {
+            DepositItemID = Convert.ToInt32(Config["DepositItemID"], CultureInfo.InvariantCulture);
+            DepositBoxSkinID = Convert.ToUInt64(Config["DepositBoxSkinID"], CultureInfo.InvariantCulture);
+            MaxDepositLimit = Convert.ToInt32(Config["MaxDepositLimit"], CultureInfo.InvariantCulture);
+        }
+
+        private void SaveConfiguration()
+        {
+            Config["DepositItemID"] = DepositItemID;
+            Config["DepositBoxSkinID"] = DepositBoxSkinID;
+            Config["MaxDepositLimit"] = MaxDepositLimit;
             SaveConfig();
         }
 
@@ -46,10 +70,8 @@ namespace Oxide.Plugins
         {
             foreach (var entity in BaseNetworkable.serverEntities)
             {
-                if (entity is StorageContainer storageContainer)
-                {
-                    OnEntitySpawned(storageContainer);
-                }
+                if (entity is StorageContainer container)
+                    OnEntitySpawned(container);
             }
         }
 
@@ -57,27 +79,23 @@ namespace Oxide.Plugins
         {
             foreach (var entity in BaseNetworkable.serverEntities)
             {
-                if (entity is StorageContainer storageContainer && storageContainer.TryGetComponent(out DepositBoxRestriction restriction))
-                {
+                if (entity is StorageContainer container && container.TryGetComponent(out DepositBoxRestriction restriction))
                     restriction.Destroy();
-                }
             }
             instance = null;
         }
 
         void OnEntitySpawned(StorageContainer container)
         {
-            if (container == null || container.skinID != DepositBoxSkinID) return;  // Early return for non-matching containers
+            if (container == null || container.skinID != DepositBoxSkinID) return;
             if (!container.TryGetComponent(out DepositBoxRestriction mono))
             {
                 mono = container.gameObject.AddComponent<DepositBoxRestriction>();
-                mono.container = container.inventory;  // Assign inventory upon component addition
+                mono.container = container.inventory;
                 mono.InitDepositBox();
             }
         }
-        #endregion
 
-        #region Commands
         [ChatCommand("depositbox")]
         private void GiveDepositBox(BasePlayer player, string command, string[] args)
         {
@@ -90,67 +108,69 @@ namespace Oxide.Plugins
             player.ChatMessage(lang.GetMessage("BoxGiven", this, player.UserIDString));
         }
 
-        [ChatCommand("checkdeposits")]
-        private void CheckDepositsCommand(BasePlayer player, string command, string[] args)
+        [ChatCommand("depositsummary")]
+        private void DepositSummaryCommand(BasePlayer player, string command, string[] args)
         {
-            if (!permission.UserHasPermission(player.UserIDString, permCheck))
+            if (!permission.UserHasPermission(player.UserIDString, permAdminCheck))
             {
-                player.ChatMessage(lang.GetMessage("NoCheckPermission", this, player.UserIDString));
+                player.ChatMessage("You do not have permission to run this command.");
                 return;
             }
 
-            if (depositLog == null || depositLog.Deposits.Count == 0)
-            {
-                player.ChatMessage(lang.GetMessage("NoDepositData", this, player.UserIDString));
-                return;
-            }
+            int prizePool = 100000;
+            if (args.Length > 0 && int.TryParse(args[0], out int parsedAmount))
+                prizePool = parsedAmount;
 
-            // Group the deposits by SteamID and calculate the total amount deposited for each player
-            var depositSummary = depositLog.Deposits
-                .GroupBy(entry => entry.SteamId)
-                .Select(group => new
-                {
-                    SteamId = group.Key,
-                    TotalAmount = group.Sum(entry => entry.AmountDeposited)
-                })
-                .ToList();
-
-            // Calculate the total amount deposited by all players
-            int totalDeposited = depositSummary.Sum(summary => summary.TotalAmount);
-
-            // Find the current player's total deposits
-            var playerSummary = depositSummary.FirstOrDefault(summary => summary.SteamId == player.UserIDString);
-
-            if (playerSummary != null)
-            {
-                // Calculate the percentage of total deposits for the current player
-                double percentageOfTotal = ((double)playerSummary.TotalAmount / totalDeposited) * 100;
-                player.ChatMessage(lang.GetMessage("PlayerDepositSummary", this, player.UserIDString)
-                    .Replace("{amount}", playerSummary.TotalAmount.ToString(CultureInfo.InvariantCulture))
-                    .Replace("{percentage}", percentageOfTotal.ToString("F2", CultureInfo.InvariantCulture)));
-            }
-            else
-            {
-                player.ChatMessage(lang.GetMessage("NoPlayerDeposits", this, player.UserIDString));
-            }
-
-            // Admin view if player has both permissions
-            if (permission.UserHasPermission(player.UserIDString, permAdminCheck))
-            {
-                player.ChatMessage(lang.GetMessage("DepositTotals", this, player.UserIDString));
-                foreach (var summary in depositSummary)
-                {
-                    double percentage = ((double)summary.TotalAmount / totalDeposited) * 100;
-                    player.ChatMessage(lang.GetMessage("DepositEntrySummary", this, player.UserIDString)
-                        .Replace("{steamid}", summary.SteamId)
-                        .Replace("{amount}", summary.TotalAmount.ToString(CultureInfo.InvariantCulture))
-                        .Replace("{percentage}", percentage.ToString("F2", CultureInfo.InvariantCulture)));
-                }
-            }
+            GenerateDepositSummary(player, prizePool);
         }
-        #endregion
 
-        #region DepositBoxRestriction Class
+        public object GenerateDepositSummary(BasePlayer player = null, int prizePool = 100000)
+        {
+            var playerTotals = new Dictionary<string, int>();
+            int totalDeposits = 0;
+
+            // Calculate totals on-demand from the log file
+            foreach (var entry in depositLog.Deposits)
+            {
+                if (!playerTotals.ContainsKey(entry.SteamId))
+                    playerTotals[entry.SteamId] = 0;
+
+                playerTotals[entry.SteamId] += entry.AmountDeposited;
+                totalDeposits += entry.AmountDeposited;
+            }
+
+            var summary = new Dictionary<string, object>();
+            var claims = new Dictionary<string, int>();
+            var csvBuilder = new StringBuilder();
+            csvBuilder.AppendLine("steamid,total_deposited,percentage,sats_reward");
+
+            foreach (var entry in playerTotals)
+            {
+                double percentage = totalDeposits > 0 ? (double)entry.Value / totalDeposits : 0;
+                int reward = (int)Math.Round(percentage * prizePool);
+
+                summary[entry.Key] = new
+                {
+                    total_deposited = entry.Value,
+                    percentage = percentage * 100,
+                    sats_reward = reward
+                };
+
+                claims[entry.Key] = reward;
+                csvBuilder.AppendLine($"{entry.Key},{entry.Value},{(percentage * 100).ToString("F2", CultureInfo.InvariantCulture)},{reward}");
+            }
+
+            string dirPath = Interface.Oxide.DataDirectory + "/DepositBox";
+            if (!Directory.Exists(dirPath)) Directory.CreateDirectory(dirPath);
+
+            File.WriteAllText(Path.Combine(dirPath, "DepositBoxSummary.json"), JsonConvert.SerializeObject(summary, Formatting.Indented));
+            File.WriteAllText(Path.Combine(dirPath, "DepositBoxClaims.json"), JsonConvert.SerializeObject(claims, Formatting.Indented));
+            File.WriteAllText(Path.Combine(dirPath, "DepositBoxSummary.csv"), csvBuilder.ToString());
+
+            player?.ChatMessage($"Deposit summary saved to data/DepositBox/ with prize pool: {prizePool} sats");
+            return true;
+        }
+
         public class DepositBoxRestriction : FacepunchBehaviour
         {
             public ItemContainer container;
@@ -159,42 +179,70 @@ namespace Oxide.Plugins
                 container.canAcceptItem += CanAcceptItem;
                 container.onItemAddedRemoved += OnItemAddedRemoved;
             }
+
             private bool CanAcceptItem(Item item, int targetPos)
             {
-                // Only allow the configured deposit item to be deposited
                 if (item == null || item.info == null || item.info.itemid != DepositBox.instance.DepositItemID)
+                    return false;
+
+                var player = item.GetOwnerPlayer();
+                if (player == null)
+                    return false;
+
+                int currentTotal = 0;
+                string summaryPath = Path.Combine(Interface.Oxide.DataDirectory, "DepositBox/DepositBoxSummary.json");
+                if (File.Exists(summaryPath))
                 {
+                    try
+                    {
+                        var summaryData = JsonConvert.DeserializeObject<Dictionary<string, Newtonsoft.Json.Linq.JObject>>(File.ReadAllText(summaryPath));
+                        if (summaryData.TryGetValue(player.UserIDString, out var playerData))
+                        {
+                            currentTotal = playerData.Value<int>("total_deposited");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        DepositBox.instance.Puts($"Warning: Could not read or parse DepositBoxSummary.json for limit check. Allowing deposit. Error: {ex.Message}");
+                    }
+                }
+
+                // Check if the player's total from the last summary already exceeds the limit.
+                // This is a simple check and does not account for deposits made after the last summary.
+                if (currentTotal >= DepositBox.instance.MaxDepositLimit)
+                {
+                    player.ChatMessage($"Your total on the last leaderboard ({currentTotal} scrap) meets or exceeds the deposit limit of {DepositBox.instance.MaxDepositLimit}. You cannot deposit more until the next leaderboard update.");
+                    player.GiveItem(item);
                     return false;
                 }
-                if (item.GetOwnerPlayer() is BasePlayer player)
-                {
-                    DepositBox.instance.TrackDeposit(item, player); // Track the item with player reference
-                }
+
+                // The old check for `item.amount > maxAllowed` is removed as per the new, simplified logic.
+                // We now only check if the player was already over the limit at the time of the last summary.
+                // If the player is under the limit, we accept the deposit.
+                DepositBox.instance.TrackDeposit(item, player);
                 return true;
             }
+
             private void OnItemAddedRemoved(Item item, bool added)
             {
-                // Early exit if item isn't added or isn't the correct deposit item
                 if (!added || item.info.itemid != DepositBox.instance.DepositItemID) return;
-                // Try to get the player who deposited the item
+
                 if (DepositBox.instance.depositTrack.TryGetValue(item, out BasePlayer player))
                 {
-                    DepositBox.instance.LogDeposit(player, item.amount); // Log the deposit first
-                    DepositBox.instance.depositTrack.Remove(item); // Remove from tracking
-                    // Now remove the deposited item from the box, after logging is complete
+                    DepositBox.instance.LogDeposit(player, item.amount);
+                    DepositBox.instance.depositTrack.Remove(item);
                     item.Remove();
                 }
             }
+
             public void Destroy()
             {
                 container.canAcceptItem -= CanAcceptItem;
                 container.onItemAddedRemoved -= OnItemAddedRemoved;
-                Destroy(this);
+                UnityEngine.Object.Destroy(this);
             }
         }
-        #endregion
 
-        #region Logging
         private class DepositLog
         {
             [JsonProperty("deposits")]
@@ -213,39 +261,23 @@ namespace Oxide.Plugins
 
         public void LogDeposit(BasePlayer player, int amount)
         {
-            // Record this deposit
             depositLog.Deposits.Add(new DepositEntry
             {
                 SteamId = player.UserIDString,
                 Timestamp = DateTime.UtcNow.ToString("o"),
                 AmountDeposited = amount
             });
-            SaveDepositLog(); // Save the log after recording the deposit
-        
-            // Calculate the player's total deposits
-            int playerTotalDeposits = depositLog.Deposits
-                .Where(entry => entry.SteamId == player.UserIDString)
-                .Sum(entry => entry.AmountDeposited);
-        
-            // Calculate the total deposits of all players
-            int totalDepositedByAllPlayers = depositLog.Deposits.Sum(entry => entry.AmountDeposited);
-        
-            // Calculate the player's percentage of all deposits
-            double playerPercentageOfTotal = ((double)playerTotalDeposits / totalDepositedByAllPlayers) * 100;
-        
-            // Send the updated deposit message to the player
+
+            SaveDepositLog();
+
             player.ChatMessage(lang.GetMessage("DepositRecorded", this, player.UserIDString)
-                .Replace("{amount}", amount.ToString(CultureInfo.InvariantCulture))
-                .Replace("{total_amount}", playerTotalDeposits.ToString(CultureInfo.InvariantCulture))
-                .Replace("{percentage}", playerPercentageOfTotal.ToString("F2", CultureInfo.InvariantCulture)));
+                .Replace("{amount}", amount.ToString(CultureInfo.InvariantCulture)));
         }
 
         public void TrackDeposit(Item item, BasePlayer player)
         {
             if (item != null && player != null)
-            {
-                depositTrack[item] = player; // Track the item with its owner
-            }
+                depositTrack[item] = player;
         }
 
         private void LoadDepositLog()
@@ -257,33 +289,16 @@ namespace Oxide.Plugins
         {
             Interface.Oxide.DataFileSystem.WriteObject("DepositBoxLog", depositLog);
         }
-        #endregion
 
-        #region Configuration
-        private void LoadConfiguration()
-        {
-            DepositItemID = Convert.ToInt32(Config["DepositItemID"], CultureInfo.InvariantCulture); // Specified CultureInfo
-            DepositBoxSkinID = Convert.ToUInt64(Config["DepositBoxSkinID"], CultureInfo.InvariantCulture); // Specified CultureInfo
-        }
-        #endregion
-
-        #region Localization
         protected override void LoadDefaultMessages()
         {
             lang.RegisterMessages(new Dictionary<string, string>
             {
-                ["NoPermission"] = "You do not have permission to place this box.",
-                ["BoxGiven"] = "You have received a Deposit Box.",
-                ["DepositRecorded"] = "Your deposit of {amount} has been recorded. You have deposited a total of {total_amount} items, which is {percentage}% of all deposits.",
-                ["PlacedNoPerm"] = "You have placed a deposit box but lack permission to place it.",
-                ["NoCheckPermission"] = "You do not have permission to check deposits.",
-                ["NoDepositData"] = "No deposit data found.",
-                ["PlayerDepositSummary"] = "You have deposited a total of {amount} items, which is {percentage}% of all deposits.",
-                ["NoPlayerDeposits"] = "You have not made any deposits.",
-                ["DepositTotals"] = "Deposit Totals:",
-                ["DepositEntrySummary"] = "SteamID: {steamid}, Total Deposited: {amount}, {percentage}% of total."
+                {"NoPermission", "You do not have permission to place this box."},
+                {"BoxGiven", "You have received a Deposit Box."},
+                {"DepositRecorded", "Your deposit of {amount} scrap has been recorded successfully."},
+                {"PlacedNoPerm", "You have placed a deposit box but lack permission to place it."}
             }, this);
         }
-        #endregion
     }
 }
