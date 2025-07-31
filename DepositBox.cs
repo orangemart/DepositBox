@@ -11,7 +11,7 @@ using Oxide.Core.Libraries.Covalence;
 
 namespace Oxide.Plugins
 {
-    [Info("DepositBox", "Orangemart", "1.0.0")]
+    [Info("DepositBox", "Orangemart", "2.0.0")]
     [Description("Drop box that registers drops for admin while removing items from the game.")]
     public class DepositBox : RustPlugin
     {
@@ -37,10 +37,14 @@ namespace Oxide.Plugins
 
         [ConsoleCommand("depositsummary")]
         private void ConsoleDepositSummary(ConsoleSystem.Arg arg)
-        {
-            GenerateDepositSummary(null, 100000);
-            Puts("✅ Deposit summary generated via console command.");
-        }
+{
+    int prizePool = 100000;
+    if (arg.Args != null && arg.Args.Length > 0 && int.TryParse(arg.Args[0], out int parsedAmount))
+        prizePool = parsedAmount;
+
+    GenerateDepositSummary(null, prizePool);
+    Puts($"✅ Deposit summary generated with prize pool: {prizePool} sats.");
+}
 
         protected override void LoadDefaultConfig()
         {
